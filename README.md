@@ -13,7 +13,7 @@ A [FFMpeg][1] video filter proxy.
 A dynamic shared object that provides the following signatures:
 
 - `int filter_init(const char *config, void **user_data)`
-- `int filter_frame(unsigned char *data, unsigned int data_size, int width, int height, int line_size, double ts_millis, void *user_data)`
+- `int filter_frame(unsigned char *data, unsigned int data_size, int width, int height, double ts_millis, void *user_data)`
 - `void filter_uninit(void *user_data)`
 
 On success, `filter_init` and `filter_frame` should return `0`.

@@ -142,7 +142,7 @@ static int filter_frame(AVFilterLink* inlink, AVFrame* in) {
   double time_ms = in->pts * av_q2d(inlink->time_base) * 1000;
 
   int rc = pc->filter_frame(out->data[0], data_size, in->width, in->height,
-                            in->linesize[0], time_ms, pc->user_data);
+                            time_ms, pc->user_data);
 
   if (!direct) {
     av_frame_free(&in);
