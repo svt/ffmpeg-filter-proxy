@@ -24,13 +24,7 @@ typedef struct {
   void* handle;
   void* user_data;
   int (*filter_init)(const char*, void**);
-  int (*filter_frame)(unsigned char*,
-                      unsigned int,
-                      int,
-                      int,
-                      int,
-                      double,
-                      void*);
+  int (*filter_frame)(unsigned char*, unsigned int, int, int, double, void*);
   void (*filter_uninit)(void*);
 } ProxyContext;
 
