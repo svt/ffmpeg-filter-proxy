@@ -27,6 +27,12 @@ filter doesn't need any specific configuration.
 
 Only `AV_PIX_FMT_BGRA` is used right now since that's what we need.
 
+However, there is a boolean option `split` that when enabled produces 2 outputs, 
+the unmodified input frame with preserved pixel format and a transparent bgra frame passed through the proxied filter.
+
+This can be used in combination with the overlay filter in Ffmpeg to preserve 10 bit color: 
+`-vf "proxy=split=1:<other proxy params>,overlay=format=yuv420p10"`
+
 ## License
 
 Copyright 2020 Sveriges Television AB.
