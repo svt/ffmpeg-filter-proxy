@@ -13,6 +13,7 @@
 #include "libavutil/avassert.h"
 #include "libavutil/avstring.h"
 #include "libavutil/imgutils.h"
+#include "libavutil/intreadwrite.h"
 #include "libavutil/opt.h"
 #include "libavutil/parseutils.h"
 #include "video.h"
@@ -21,6 +22,7 @@ typedef struct {
   const AVClass* class;
   char* filter_path;
   char* config;
+  int clear;
   void* handle;
   void* user_data;
   int (*filter_init)(const char*, void**);
@@ -109,6 +111,12 @@ static int query_formats(AVFilterContext* ctx) {
   return ff_set_common_formats(ctx, fmts_list);
 }
 
+static void clear_image(AVFrame* out) {
+  for (int i = 0; i < out->height; i++)
+    for (int j = 0; j < out->width; j++)
+      AV_WN32(out->data[0] + i * out->linesize[0] + j * 4, 0);
+}
+
 static int filter_frame(AVFilterLink* inlink, AVFrame* in) {
   AVFilterContext* ctx = inlink->dst;
   AVFilterLink* outlink = ctx->outputs[0];
@@ -137,6 +145,10 @@ static int filter_frame(AVFilterLink* inlink, AVFrame* in) {
   if (data_size < 0) {
     av_log(ctx, AV_LOG_ERROR, "error getting buffer size\n");
     return data_size;
+  }
+
+  if (pc->clear) {
+    clear_image(out);
   }
 
   double time_ms = in->pts * av_q2d(inlink->time_base) * 1000;
@@ -191,6 +203,14 @@ static const AVOption proxy_options[] = {
      {.str = ""},
      CHAR_MIN,
      CHAR_MAX,
+     FLAGS},
+    {"clear",
+     "clear frame before filtering",
+     OFFSET(clear),
+     AV_OPT_TYPE_BOOL,
+     {.i64 = 0},
+     0,
+     1,
      FLAGS},
     {NULL},
 };

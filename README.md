@@ -27,6 +27,11 @@ filter doesn't need any specific configuration.
 
 Only `AV_PIX_FMT_BGRA` is used right now since that's what we need.
 
+It is possible though, to preserve 10 bit colors using the `clear` param in combination with Ffmpegs split and overlay filters:
+
+`-filter_complex "split=2[main][over1];[over1]proxy=clear=1:<other proxy params>[over2];[main][over2]overlay=format=yuv420p10`
+
+
 ## License
 
 Copyright 2020 Sveriges Television AB.
