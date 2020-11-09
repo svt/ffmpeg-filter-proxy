@@ -112,9 +112,11 @@ static int query_formats(AVFilterContext* ctx) {
 }
 
 static void clear_image(AVFrame* out) {
-  for (int i = 0; i < out->height; i++)
-    for (int j = 0; j < out->width; j++)
+  for (int i = 0; i < out->height; i++) {
+    for (int j = 0; j < out->width; j++) {
       AV_WN32(out->data[0] + i * out->linesize[0] + j * 4, 0);
+    }
+  }
 }
 
 static int filter_frame(AVFilterLink* inlink, AVFrame* in) {
