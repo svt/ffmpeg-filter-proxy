@@ -97,20 +97,6 @@ static av_cold void uninit(AVFilterContext* ctx) {
   }
 }
 
-static int query_formats(AVFilterContext* ctx) {
-  const enum AVPixelFormat pix_fmts[] = {
-      AV_PIX_FMT_BGRA,
-      AV_PIX_FMT_NONE,
-  };
-
-  AVFilterFormats* fmts_list = ff_make_format_list(pix_fmts);
-  if (!fmts_list) {
-    return AVERROR(ENOMEM);
-  }
-
-  return ff_set_common_formats(ctx, fmts_list);
-}
-
 static void clear_image(AVFrame* out) {
   for (int i = 0; i < out->height; i++) {
     for (int j = 0; j < out->width; j++) {
@@ -175,19 +161,17 @@ static int config_input(AVFilterLink* inlink) {
 }
 
 static const AVFilterPad inputs[] = {{
-                                         .name = "default",
-                                         .type = AVMEDIA_TYPE_VIDEO,
-                                         .filter_frame = filter_frame,
-                                         .config_props = config_input,
-                                         .needs_writable = 1,
-                                     },
-                                     {NULL}};
+    .name = "default",
+    .type = AVMEDIA_TYPE_VIDEO,
+    .filter_frame = filter_frame,
+    .config_props = config_input,
+    .flags = AVFILTERPAD_FLAG_NEEDS_WRITABLE,
+}};
 
 static const AVFilterPad outputs[] = {{
-                                          .name = "default",
-                                          .type = AVMEDIA_TYPE_VIDEO,
-                                      },
-                                      {NULL}};
+    .name = "default",
+    .type = AVMEDIA_TYPE_VIDEO,
+}};
 
 static const AVOption proxy_options[] = {
     {"filter_path",
@@ -219,14 +203,14 @@ static const AVOption proxy_options[] = {
 
 AVFILTER_DEFINE_CLASS(proxy);
 
-AVFilter ff_vf_proxy = {
+const AVFilter ff_vf_proxy = {
     .name = "proxy",
     .description = NULL_IF_CONFIG_SMALL("Video filter proxy."),
     .priv_size = sizeof(ProxyContext),
     .init = init,
     .uninit = uninit,
-    .query_formats = query_formats,
-    .inputs = inputs,
-    .outputs = outputs,
+    FILTER_INPUTS(inputs),
+    FILTER_OUTPUTS(outputs),
+    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_BGRA),
     .priv_class = &proxy_class,
 };
