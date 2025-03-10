@@ -9,7 +9,6 @@
 
 #include "avfilter.h"
 #include "formats.h"
-#include "internal.h"
 #include "libavutil/avassert.h"
 #include "libavutil/avstring.h"
 #include "libavutil/imgutils.h"
