@@ -205,11 +205,11 @@ AVFILTER_DEFINE_CLASS(proxy);
 const FFFilter ff_vf_proxy = {
     .p.name = "proxy",
     .p.description = NULL_IF_CONFIG_SMALL("Video filter proxy."),
+    .p.priv_class = &proxy_class,
     .priv_size = sizeof(ProxyContext),
     .init = init,
     .uninit = uninit,
     FILTER_INPUTS(inputs),
     FILTER_OUTPUTS(outputs),
     FILTER_SINGLE_PIXFMT(AV_PIX_FMT_BGRA),
-    .p.priv_class = &proxy_class,
 };
