@@ -211,5 +211,5 @@ const FFFilter ff_vf_proxy = {
     .uninit = uninit,
     FILTER_INPUTS(inputs),
     FILTER_OUTPUTS(outputs),
-    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_BGRA),
+    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_RGB32),
 };
