@@ -23,6 +23,20 @@ The `config` parameter to `filter_init` is filter implementation specific.
 It could be a config filename or the complete config, or `NULL` if the proxied
 filter doesn't need any specific configuration.
 
+### Optional caching hint
+
+A plugin may export an additional symbol:
+
+- `uint64_t filter_version(double ts_millis, void *user_data)`
+
+If present, the proxy calls it before each frame. When the returned value
+matches the value from the previous render the proxy reuses the cached
+scratch buffer and skips both the `memset` and the `filter_frame` call.
+The plugin must compute the value as a pure function of `ts_millis` and
+its init-time state (no internal "last seen" tracking) so backward seeks
+work correctly. Plugins that don't export this symbol render every frame
+as before.
+
 ## Pixel formats
 
 The filter accepts 10-bit YUV input only:
@@ -49,8 +63,8 @@ Copyright 2020 Sveriges Television AB.
 This software is released under the GNU Lesser General Public License
 version 2.1 or later (LGPL v2.1+).
 
-## Primary Maintainers
+## Credits
 
-Christer Sandberg <https://github.com/chrsan>
+Originally created by Christer Sandberg <https://github.com/chrsan>.
 
 [1]: https://www.ffmpeg.org

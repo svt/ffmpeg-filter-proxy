@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "avfilter.h"
+#include "filters.h"
 #include "formats.h"
 #include "libavutil/common.h"
 #include "libavutil/intreadwrite.h"
@@ -33,12 +34,19 @@ typedef struct {
                       double,
                       void*);
   void (*filter_uninit)(void*);
+  // Optional. If exported, the proxy reuses the previous scratch render
+  // when the version returned for the current `ts_millis` matches the
+  // previously rendered version.
+  uint64_t (*filter_version)(double, void*);
 
   // Per-instance BGRA scratch the proxied filter paints into.
   // Cairo-style premultiplied 8-bit; composited onto the 10-bit YUV input frame.
   uint8_t* scratch;
   int scratch_size;
   int scratch_linesize;
+
+  uint64_t cached_version;
+  int cache_present;
 } ProxyContext;
 
 #define OFFSET(x) offsetof(ProxyContext, x)
@@ -80,6 +88,9 @@ static av_cold int init(AVFilterContext* ctx) {
     return AVERROR(EINVAL);
   }
 
+  pc->filter_version = dlsym(pc->handle, "filter_version");
+  (void)dlerror();
+
   int rc;
   if ((rc = pc->filter_init(pc->config, &pc->user_data)) != 0) {
     av_log(ctx, AV_LOG_ERROR, "filter_init returned: %d\n", rc);
@@ -104,75 +115,104 @@ static av_cold void uninit(AVFilterContext* ctx) {
   }
 }
 
+// All values needed to convert 10-bit YUV ↔ normalized RGB for a given frame.
+// Hoisted here so the inner per-pixel loop multiplies, doesn't divide.
 typedef struct {
   float kr, kg, kb;
-  int limited;
+  // YUV→RGB coefficients (chroma → R, G, B contributions).
+  float cu;   //  2 * (1 - kb)
+  float cv;   //  2 * (1 - kr)
+  float cgu;  // -kb * cu / kg  (U contribution to G)
+  float cgv;  // -kr * cv / kg  (V contribution to G)
+  // Range scaling.
+  float y_in_scale;   // (yn from y) = (y - y_offset_in) * y_in_scale
+  float uv_in_scale;  // (un from u) = (u - 512) * uv_in_scale
+  float y_out_scale;  // (y from yn) = round(yn * y_out_scale) + y_offset_out
+  float uv_out_scale;
+  int y_offset_in;
+  int y_offset_out;
 } ColorSpec;
 
 static ColorSpec color_spec_for_frame(const AVFrame* f) {
-  ColorSpec s = {0.2126f, 0.7152f, 0.0722f, 1};
+  float kr = 0.2126f, kg = 0.7152f, kb = 0.0722f;
   if (f->colorspace == AVCOL_SPC_BT470BG ||
       f->colorspace == AVCOL_SPC_SMPTE170M) {
-    s.kr = 0.299f;
-    s.kg = 0.587f;
-    s.kb = 0.114f;
+    kr = 0.299f;
+    kg = 0.587f;
+    kb = 0.114f;
   }
-  if (f->color_range == AVCOL_RANGE_JPEG) {
-    s.limited = 0;
-  }
+  const int limited = (f->color_range != AVCOL_RANGE_JPEG);
+  const float cu = 2.0f * (1.0f - kb);
+  const float cv = 2.0f * (1.0f - kr);
+  ColorSpec s = {
+      .kr = kr,
+      .kg = kg,
+      .kb = kb,
+      .cu = cu,
+      .cv = cv,
+      .cgu = -kb * cu / kg,
+      .cgv = -kr * cv / kg,
+      .y_in_scale = limited ? 1.0f / 876.0f : 1.0f / 1023.0f,
+      .uv_in_scale = limited ? 1.0f / 896.0f : 1.0f / 1023.0f,
+      .y_out_scale = limited ? 876.0f : 1023.0f,
+      .uv_out_scale = limited ? 896.0f : 1023.0f,
+      .y_offset_in = limited ? 64 : 0,
+      .y_offset_out = limited ? 64 : 0,
+  };
   return s;
 }
 
-static inline void yuv_to_rgb(int y, int u, int v, ColorSpec s,
+static inline void yuv_to_rgb(int y, int u, int v, const ColorSpec* s,
                               float* r_out, float* g_out, float* b_out) {
-  float yn, un, vn;
-  if (s.limited) {
-    yn = (y - 64) * (1.0f / 876.0f);
-    un = (u - 512) * (1.0f / 896.0f);
-    vn = (v - 512) * (1.0f / 896.0f);
-  } else {
-    yn = y * (1.0f / 1023.0f);
-    un = (u - 512) * (1.0f / 1023.0f);
-    vn = (v - 512) * (1.0f / 1023.0f);
-  }
-  float cu = 2.0f * (1.0f - s.kb);
-  float cv = 2.0f * (1.0f - s.kr);
-  *r_out = yn + cv * vn;
-  *g_out = yn - (s.kb * cu / s.kg) * un - (s.kr * cv / s.kg) * vn;
-  *b_out = yn + cu * un;
+  const float yn = (y - s->y_offset_in) * s->y_in_scale;
+  const float un = (u - 512) * s->uv_in_scale;
+  const float vn = (v - 512) * s->uv_in_scale;
+  *r_out = yn + s->cv * vn;
+  *g_out = yn + s->cgu * un + s->cgv * vn;
+  *b_out = yn + s->cu * un;
 }
 
-static inline int rgb_to_y10(float r, float g, float b, ColorSpec s) {
-  float yn = s.kr * r + s.kg * g + s.kb * b;
-  int v = s.limited ? (int)lrintf(yn * 876.0f) + 64
-                    : (int)lrintf(yn * 1023.0f);
-  return av_clip(v, 0, 1023);
+static inline int rgb_to_y10(float r, float g, float b, const ColorSpec* s) {
+  const float yn = s->kr * r + s->kg * g + s->kb * b;
+  return av_clip((int)lrintf(yn * s->y_out_scale) + s->y_offset_out, 0, 1023);
 }
 
-static inline void rgb_to_uv10(float r, float g, float b, ColorSpec s,
+static inline void rgb_to_uv10(float r, float g, float b, const ColorSpec* s,
                                int* u_out, int* v_out) {
-  float yn = s.kr * r + s.kg * g + s.kb * b;
-  float un = (b - yn) / (2.0f * (1.0f - s.kb));
-  float vn = (r - yn) / (2.0f * (1.0f - s.kr));
-  if (s.limited) {
-    *u_out = av_clip((int)lrintf(un * 896.0f) + 512, 0, 1023);
-    *v_out = av_clip((int)lrintf(vn * 896.0f) + 512, 0, 1023);
-  } else {
-    *u_out = av_clip((int)lrintf(un * 1023.0f) + 512, 0, 1023);
-    *v_out = av_clip((int)lrintf(vn * 1023.0f) + 512, 0, 1023);
-  }
+  const float yn = s->kr * r + s->kg * g + s->kb * b;
+  const float un = (b - yn) / s->cu;
+  const float vn = (r - yn) / s->cv;
+  *u_out = av_clip((int)lrintf(un * s->uv_out_scale) + 512, 0, 1023);
+  *v_out = av_clip((int)lrintf(vn * s->uv_out_scale) + 512, 0, 1023);
 }
 
-// Composite the BGRA scratch (premultiplied, 8-bit) onto a 10-bit YUV frame
-// in place. Operates in non-linear RGB (matches cairo's sRGB-encoded output
-// and what vf_overlay does), so subtitle/logo edges look identical to the
-// previous split/overlay pipeline.
-static void composite_bgra_on_yuv(AVFrame* dst, const ProxyContext* pc) {
-  const ColorSpec spec = color_spec_for_frame(dst);
-  const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(dst->format);
-  const int sub_x = 1 << desc->log2_chroma_w;
-  const int sub_y = 1 << desc->log2_chroma_h;
-  const float inv_n = 1.0f / (float)(sub_x * sub_y);
+typedef struct {
+  AVFrame* dst;
+  const ProxyContext* pc;
+  ColorSpec spec;
+  int sub_x;
+  int sub_y;
+  int chroma_w;
+  int chroma_h;
+  float inv_n;
+} ComposeJob;
+
+// Composite a slice of chroma rows in [slice_start, slice_end). The composite
+// is in non-linear RGB (matches cairo's sRGB-encoded output and what
+// vf_overlay does), so subtitle/logo edges look identical to the previous
+// split/overlay pipeline.
+static int composite_slice(AVFilterContext* ctx, void* arg, int jobnr,
+                           int nb_jobs) {
+  const ComposeJob* j = arg;
+  const int slice_start = (j->chroma_h * jobnr) / nb_jobs;
+  const int slice_end = (j->chroma_h * (jobnr + 1)) / nb_jobs;
+
+  const int sub_x = j->sub_x;
+  const int sub_y = j->sub_y;
+  const float inv_n = j->inv_n;
+  const ColorSpec* spec = &j->spec;
+  const ProxyContext* pc = j->pc;
+  AVFrame* dst = j->dst;
 
   uint8_t* y_plane = dst->data[0];
   uint8_t* u_plane = dst->data[1];
@@ -181,11 +221,8 @@ static void composite_bgra_on_yuv(AVFrame* dst, const ProxyContext* pc) {
   const int u_stride = dst->linesize[1];
   const int v_stride = dst->linesize[2];
 
-  const int chroma_h = dst->height / sub_y;
-  const int chroma_w = dst->width / sub_x;
-
-  for (int cy = 0; cy < chroma_h; cy++) {
-    for (int cx = 0; cx < chroma_w; cx++) {
+  for (int cy = slice_start; cy < slice_end; cy++) {
+    for (int cx = 0; cx < j->chroma_w; cx++) {
       // Skip cells that the proxied filter didn't touch. Cairo writes
       // 0x00000000 for unpainted pixels (alpha 0 implies premul rgb 0), so a
       // zero alpha byte is sufficient.
@@ -246,6 +283,44 @@ static void composite_bgra_on_yuv(AVFrame* dst, const ProxyContext* pc) {
       AV_WL16(vp, new_v);
     }
   }
+  return 0;
+}
+
+static void composite_bgra_on_yuv(AVFilterContext* ctx, AVFrame* dst,
+                                  const ProxyContext* pc) {
+  const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(dst->format);
+  ComposeJob job = {
+      .dst = dst,
+      .pc = pc,
+      .spec = color_spec_for_frame(dst),
+      .sub_x = 1 << desc->log2_chroma_w,
+      .sub_y = 1 << desc->log2_chroma_h,
+  };
+  job.chroma_w = dst->width / job.sub_x;
+  job.chroma_h = dst->height / job.sub_y;
+  job.inv_n = 1.0f / (float)(job.sub_x * job.sub_y);
+
+  const int nb = FFMIN(job.chroma_h, ff_filter_get_nb_threads(ctx));
+  ff_filter_execute(ctx, composite_slice, &job, NULL, FFMAX(nb, 1));
+}
+
+static int ensure_scratch(ProxyContext* pc, int w, int h) {
+  const int linesize = w * 4;
+  const int size = linesize * h;
+  if (size == pc->scratch_size && linesize == pc->scratch_linesize) {
+    return 0;
+  }
+  av_freep(&pc->scratch);
+  pc->scratch = av_mallocz(size);
+  if (!pc->scratch) {
+    pc->scratch_size = 0;
+    pc->scratch_linesize = 0;
+    return AVERROR(ENOMEM);
+  }
+  pc->scratch_linesize = linesize;
+  pc->scratch_size = size;
+  pc->cache_present = 0;  // resize invalidates the previous render
+  return 0;
 }
 
 static int filter_frame(AVFilterLink* inlink, AVFrame* in) {
@@ -253,35 +328,43 @@ static int filter_frame(AVFilterLink* inlink, AVFrame* in) {
   AVFilterLink* outlink = ctx->outputs[0];
   ProxyContext* pc = ctx->priv;
 
-  memset(pc->scratch, 0, pc->scratch_size);
-
-  const double time_ms = in->pts * av_q2d(inlink->time_base) * 1000;
-  const int rc = pc->filter_frame(pc->scratch, pc->scratch_size,
-                                  in->width, in->height,
-                                  pc->scratch_linesize, time_ms,
-                                  pc->user_data);
-  if (rc != 0) {
-    av_log(ctx, AV_LOG_ERROR, "filter_frame returned: %d\n", rc);
+  int rc = ensure_scratch(pc, in->width, in->height);
+  if (rc < 0) {
     av_frame_free(&in);
-    return AVERROR_UNKNOWN;
+    return rc;
   }
 
-  composite_bgra_on_yuv(in, pc);
+  const double time_ms = in->pts * av_q2d(inlink->time_base) * 1000;
+
+  uint64_t version = 0;
+  int hit = 0;
+  if (pc->filter_version) {
+    version = pc->filter_version(time_ms, pc->user_data);
+    hit = pc->cache_present && version == pc->cached_version;
+  }
+
+  if (!hit) {
+    memset(pc->scratch, 0, pc->scratch_size);
+    rc = pc->filter_frame(pc->scratch, pc->scratch_size,
+                          in->width, in->height,
+                          pc->scratch_linesize, time_ms,
+                          pc->user_data);
+    if (rc != 0) {
+      av_log(ctx, AV_LOG_ERROR, "filter_frame returned: %d\n", rc);
+      av_frame_free(&in);
+      return AVERROR_UNKNOWN;
+    }
+    pc->cached_version = version;
+    pc->cache_present = 1;
+  }
+
+  composite_bgra_on_yuv(ctx, in, pc);
 
   return ff_filter_frame(outlink, in);
 }
 
 static int config_input(AVFilterLink* inlink) {
-  ProxyContext* pc = inlink->dst->priv;
-
-  av_freep(&pc->scratch);
-  pc->scratch_linesize = inlink->w * 4;
-  pc->scratch_size = pc->scratch_linesize * inlink->h;
-  pc->scratch = av_malloc(pc->scratch_size);
-  if (!pc->scratch) {
-    return AVERROR(ENOMEM);
-  }
-  return 0;
+  return ensure_scratch(inlink->dst->priv, inlink->w, inlink->h);
 }
 
 static const AVFilterPad inputs[] = {{
@@ -323,6 +406,7 @@ const FFFilter ff_vf_proxy = {
     .p.name = "proxy",
     .p.description = NULL_IF_CONFIG_SMALL("Video filter proxy."),
     .p.priv_class = &proxy_class,
+    .p.flags = AVFILTER_FLAG_SLICE_THREADS,
     .priv_size = sizeof(ProxyContext),
     .init = init,
     .uninit = uninit,
