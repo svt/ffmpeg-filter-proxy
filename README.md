@@ -23,13 +23,24 @@ The `config` parameter to `filter_init` is filter implementation specific.
 It could be a config filename or the complete config, or `NULL` if the proxied
 filter doesn't need any specific configuration.
 
-## Limitations
+## Pixel formats
 
-Only `AV_PIX_FMT_BGRA` is used right now since that's what we need.
+The filter accepts 10-bit YUV input only:
 
-It is possible though, to preserve 10 bit colors using the `clear` param in combination with FFmpegs split and overlay filters:
+- `AV_PIX_FMT_YUV420P10LE`
+- `AV_PIX_FMT_YUV422P10LE`
+- `AV_PIX_FMT_YUV444P10LE`
 
-`-filter_complex "split=2[main][over1];[over1]proxy=clear=1:<other proxy params>[over2];[main][over2]overlay=format=yuv420p10`
+The proxied filter still paints into an 8-bit premultiplied BGRA scratch
+buffer (cairo's natural format); the proxy filter composites that scratch
+onto the 10-bit YUV frame in-place. No `split`, `overlay`, or
+`unpremultiply` are needed in the user filter graph:
+
+`-filter_complex "proxy=<params>"`
+
+Colorspace and range are taken from the input frame metadata (BT.709 /
+limited by default, BT.601 if the frame is tagged as such, full range if
+tagged JPEG).
 
 ## License
 
