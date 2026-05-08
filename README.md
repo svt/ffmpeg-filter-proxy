@@ -56,6 +56,13 @@ Colorspace and range are taken from the input frame metadata (BT.709 /
 limited by default, BT.601 if the frame is tagged as such, full range if
 tagged JPEG).
 
+Pixels the plugin leaves transparent (alpha = 0) in the scratch buffer pass
+through the 10-bit YUV frame completely untouched. Pixels the plugin paints
+are composited from the 8-bit scratch, so they are quantized to 8-bit
+precision. Plugins intended for logos or subtitles should therefore only
+paint the overlay region and leave the rest transparent. A plugin that paints
+the entire frame will quantize every output pixel to 8-bit colour depth.
+
 ## License
 
 Copyright 2020 Sveriges Television AB.
