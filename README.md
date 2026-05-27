@@ -23,13 +23,45 @@ The `config` parameter to `filter_init` is filter implementation specific.
 It could be a config filename or the complete config, or `NULL` if the proxied
 filter doesn't need any specific configuration.
 
-## Limitations
+### Optional caching hint
 
-Only `AV_PIX_FMT_BGRA` is used right now since that's what we need.
+A plugin may export an additional symbol:
 
-It is possible though, to preserve 10 bit colors using the `clear` param in combination with FFmpegs split and overlay filters:
+- `uint64_t filter_version(double ts_millis, void *user_data)`
 
-`-filter_complex "split=2[main][over1];[over1]proxy=clear=1:<other proxy params>[over2];[main][over2]overlay=format=yuv420p10`
+If present, the proxy calls it before each frame. When the returned value
+matches the value from the previous render the proxy reuses the cached
+scratch buffer and skips both the `memset` and the `filter_frame` call.
+The plugin must compute the value as a pure function of `ts_millis` and
+its init-time state (no internal "last seen" tracking) so backward seeks
+work correctly. Plugins that don't export this symbol render every frame
+as before.
+
+## Pixel formats
+
+The filter accepts 10-bit YUV input only:
+
+- `AV_PIX_FMT_YUV420P10LE`
+- `AV_PIX_FMT_YUV422P10LE`
+- `AV_PIX_FMT_YUV444P10LE`
+
+The proxied filter still paints into an 8-bit premultiplied BGRA scratch
+buffer (cairo's natural format); the proxy filter composites that scratch
+onto the 10-bit YUV frame in-place. No `split`, `overlay`, or
+`unpremultiply` are needed in the user filter graph:
+
+`-filter_complex "proxy=<params>"`
+
+Colorspace and range are taken from the input frame metadata (BT.709 /
+limited by default, BT.601 if the frame is tagged as such, full range if
+tagged JPEG).
+
+Pixels the plugin leaves transparent (alpha = 0) in the scratch buffer pass
+through the 10-bit YUV frame completely untouched. Pixels the plugin paints
+are composited from the 8-bit scratch, so they are quantized to 8-bit
+precision. Plugins intended for logos or subtitles should therefore only
+paint the overlay region and leave the rest transparent. A plugin that paints
+the entire frame will quantize every output pixel to 8-bit colour depth.
 
 ## License
 
@@ -38,8 +70,8 @@ Copyright 2020 Sveriges Television AB.
 This software is released under the GNU Lesser General Public License
 version 2.1 or later (LGPL v2.1+).
 
-## Primary Maintainers
+## Credits
 
-Christer Sandberg <https://github.com/chrsan>
+Originally created by Christer Sandberg <https://github.com/chrsan>.
 
 [1]: https://www.ffmpeg.org
